@@ -4,7 +4,14 @@ local playerName = ""
 local callsign = ""
 local dutyBlips = {}
 
+-- /duty toggle command
 RegisterCommand("duty", function()
+    if isOnDuty then
+        -- Already on duty ? clock off
+        TriggerServerEvent("duty:updateStatus", false, department, playerName, callsign)
+        return
+    end
+
     local input = lib.inputDialog('Duty Menu', {
         {type = 'select', label = 'Department', options = {
             {label = 'SASP', value = 'SASP'},
@@ -12,20 +19,38 @@ RegisterCommand("duty", function()
             {label = 'LSPD', value = 'LSPD'}
         }},
         {type = 'input', label = 'Your Name'},
-        {type = 'input', label = 'Callsign'},
-        {type = 'checkbox', label = 'Go On Duty'}
+        {type = 'input', label = 'Callsign'}
     })
 
-    if input then
+    if input and input[1] and input[2] and input[3] then
         department = input[1]
         playerName = input[2]
         callsign = input[3]
-        isOnDuty = input[4]
 
-        TriggerServerEvent("duty:updateStatus", isOnDuty, department, playerName, callsign)
+        -- Send request to server, client will be set on duty after confirmation
+        TriggerServerEvent("duty:updateStatus", true, department, playerName, callsign)
+    else
+        lib.notify({
+            title = "Duty Menu",
+            description = "You must fill in all fields to go on duty.",
+            type = "error"
+        })
     end
 end)
 
+-- Server confirms you are on duty
+RegisterNetEvent("duty:confirmedOnDuty")
+AddEventHandler("duty:confirmedOnDuty", function()
+    isOnDuty = true
+end)
+
+-- Server informs that role check failed
+RegisterNetEvent("duty:roleFailed")
+AddEventHandler("duty:roleFailed", function()
+    isOnDuty = false
+end)
+
+-- Show duty time when clocking off
 RegisterNetEvent("duty:showDutyTime")
 AddEventHandler("duty:showDutyTime", function(dutyTime)
     lib.notify({
@@ -35,10 +60,10 @@ AddEventHandler("duty:showDutyTime", function(dutyTime)
     })
 end)
 
+-- Give full loadout
 RegisterNetEvent("duty:giveLoadout")
 AddEventHandler("duty:giveLoadout", function()
     local ped = PlayerPedId()
-
     GiveWeaponToPed(ped, `WEAPON_COMBATPISTOL`, 250, false, true)
     GiveWeaponComponentToPed(ped, `WEAPON_COMBATPISTOL`, `COMPONENT_AT_PI_FLSH`)
     GiveWeaponToPed(ped, `WEAPON_CARBINERIFLE`, 200, false, true)
@@ -53,11 +78,12 @@ AddEventHandler("duty:giveLoadout", function()
 
     lib.notify({
         title = "Loadout",
-        description = "🔫 Full duty loadout equipped with attachments.",
+        description = "?? Full duty loadout equipped with attachments.",
         type = "success"
     })
 end)
 
+-- Update blips for all players on duty
 RegisterNetEvent("duty:updateBlips")
 AddEventHandler("duty:updateBlips", function(playersOnDuty)
     for playerId, blipData in pairs(dutyBlips) do
@@ -86,14 +112,10 @@ AddEventHandler("duty:updateBlips", function(playersOnDuty)
     end
 end)
 
-function GetDepartmentBlipColor(dept)
-    return ({SASP = 5, BCSO = 17, LSPD = 3})[dept] or 1
-end
+function GetDepartmentBlipColor(dept) return ({SASP = 5, BCSO = 17, LSPD = 3})[dept] or 1 end
+function GetDepartmentBlipSprite(dept) return ({SASP = 56, BCSO = 56, LSPD = 56})[dept] or 1 end
 
-function GetDepartmentBlipSprite(dept)
-    return ({SASP = 56, BCSO = 56, LSPD = 56})[dept] or 1
-end
-
+-- Clean up blips periodically
 Citizen.CreateThread(function()
     while true do
         Wait(5000)
@@ -108,6 +130,7 @@ Citizen.CreateThread(function()
     end
 end)
 
+-- Remove blips when resource stops
 AddEventHandler('onResourceStop', function(res)
     if res == GetCurrentResourceName() then
         for _, v in pairs(dutyBlips) do

@@ -1,12 +1,3 @@
-local DISCORD_BOT_TOKEN = "DISCORD_BOT_TOKEN"
-local GUILD_ID = "GUILD_ID"
-
-local DEPARTMENT_ROLES = {
-    SASP = "SASP_ROLE_ID",
-    BCSO = "BCSO_ROLE_ID",
-    LSPD = "LSPD_ROLE_ID"
-}
-
 local playersOnDuty = {}
 
 function GetDiscordId(src)
@@ -19,7 +10,7 @@ function GetDiscordId(src)
 end
 
 function UserHasRole(discordId, roleId, callback)
-    local url = ("https://discord.com/api/v10/guilds/%s/members/%s"):format(GUILD_ID, discordId)
+    local url = ("https://discord.com/api/v10/guilds/%s/members/%s"):format(Config.GUILD_ID, discordId)
     PerformHttpRequest(url, function(code, data)
         if code == 200 then
             local user = json.decode(data)
@@ -29,7 +20,7 @@ function UserHasRole(discordId, roleId, callback)
         end
         callback(false)
     end, "GET", "", {
-        ["Authorization"] = "Bot " .. DISCORD_BOT_TOKEN,
+        ["Authorization"] = "Bot " .. Config.DISCORD_BOT_TOKEN,
         ["Content-Type"] = "application/json"
     })
 end
@@ -47,69 +38,76 @@ function BroadcastDutyBlips()
 end
 
 RegisterServerEvent("duty:updateStatus")
-AddEventHandler("duty:updateStatus", function(onDuty, department, playerName, callsign)
+AddEventHandler("duty:updateStatus", function(requestedOnDuty, department, playerName, callsign)
     local src = source
     local discordId = GetDiscordId(src)
-    local statusText = onDuty and "On Duty" or "Off Duty"
     local name = playerName or GetPlayerName(src)
-    local role = DEPARTMENT_ROLES[department]
+    local role = Config.DEPARTMENT_ROLES[department]
 
     if not discordId then
         TriggerClientEvent('ox_lib:notify', src, {type = 'error', description = "No linked Discord account."})
+        TriggerClientEvent("duty:roleFailed", src)
         return
     end
 
-    if onDuty then
-        UserHasRole(discordId, role, function(hasRole)
-            if not hasRole then
-                TriggerClientEvent('ox_lib:notify', src, {type = 'error', description = "Missing required Discord role for " .. department})
-                return
-            end
+    -- Already on duty ? clock off
+    if playersOnDuty[src] then
+        local p = playersOnDuty[src]
+        local dutyTime = FormatDutyTime(p.startTime)
+        SendDutyLogWebhook(p.playerName, p.callsign, p.department, false, p.discordId, dutyTime)
+        playersOnDuty[src] = nil
+        BroadcastDutyBlips()
 
-            playersOnDuty[src] = {
-                playerName = name,
-                callsign = callsign,
-                department = department,
-                startTime = os.time(),
-                discordId = discordId
-            }
+        TriggerClientEvent('ox_lib:notify', src, {
+            type = 'success',
+            description = string.format("You are now OFF DUTY. Time on duty: %s", dutyTime)
+        })
 
-            print(string.format("%s (%s) went ON duty in %s [%s]", name, discordId, department, callsign))
-            SendDutyLogWebhook(name, callsign, department, onDuty, discordId, nil)
-            TriggerClientEvent("duty:giveLoadout", src)
-            BroadcastDutyBlips()
+        print(string.format("%s (%s) went OFF duty", p.playerName, p.discordId))
+        return
+    end
 
-            TriggerClientEvent('ox_lib:notify', src, {
-                type = 'inform',
-                description = string.format("You are now ON DUTY as %s (%s)", department, callsign)
-            })
-        end)
-    else
-        if playersOnDuty[src] then
-            local dutyTime = FormatDutyTime(playersOnDuty[src].startTime)
-            TriggerClientEvent("duty:showDutyTime", src, dutyTime)
-            SendDutyLogWebhook(name, callsign, department, onDuty, discordId, dutyTime)
-            playersOnDuty[src] = nil
-            BroadcastDutyBlips()
-
-            TriggerClientEvent('ox_lib:notify', src, {
-                type = 'success',
-                description = string.format("You are now OFF DUTY. Time on duty: %s", dutyTime)
-            })
+    -- Not on duty ? check Discord role asynchronously
+    UserHasRole(discordId, role, function(hasRole)
+        if not hasRole then
+            TriggerClientEvent('ox_lib:notify', src, {type = 'error', description = "Missing required Discord role for " .. department})
+            TriggerClientEvent("duty:roleFailed", src)
+            return
         end
 
-        print(string.format("%s (%s) went OFF duty", name, discordId))
-    end
+        -- Role verified ? set player on duty
+        playersOnDuty[src] = {
+            playerName = name,
+            callsign = callsign,
+            department = department,
+            startTime = os.time(),
+            discordId = discordId
+        }
+
+        -- Notify client to set isOnDuty
+        TriggerClientEvent("duty:confirmedOnDuty", src)
+
+        TriggerClientEvent("duty:giveLoadout", src)
+        BroadcastDutyBlips()
+
+        TriggerClientEvent('ox_lib:notify', src, {
+            type = 'inform',
+            description = string.format("You are now ON DUTY as %s (%s)", department, callsign)
+        })
+
+        SendDutyLogWebhook(name, callsign, department, true, discordId, nil)
+
+        print(string.format("%s (%s) went ON duty in %s [%s]", name, discordId, department, callsign))
+    end)
 end)
 
+-- Send Discord webhook
 function SendDutyLogWebhook(name, callsign, department, onDuty, discordId, dutyTime)
-    local currentTime = os.date("%A, %B %d, %Y %I:%M %p")
     local status = onDuty and "On Duty" or "Off Duty"
-    local departmentLogos = {
-        SASP = "https://i.imgur.com/qwjPGhj.png",
-        BCSO = "https://i.imgur.com/MWL8fOL.png",
-        LSPD = "https://i.imgur.com/PCRR7pN.png"
-    }
+    local currentTime = os.date("%A, %B %d, %Y %I:%M %p")
+
+    -- Use logos from config
+    local logoUrl = Config.DepartmentLogos[department] or "https://i.imgur.com/default-badge.png"
 
     local fields = {
         { name = "Name", value = name, inline = true },
@@ -124,19 +122,31 @@ function SendDutyLogWebhook(name, callsign, department, onDuty, discordId, dutyT
         table.insert(fields, { name = "Duty Duration", value = dutyTime, inline = true })
     end
 
-    PerformHttpRequest("DISCORD_WEBHOOK_LINK", function() end, "POST", json.encode({
-        username = "SpongeBobs Duty System",
-        avatar_url = "https://i.imgur.com/RZ26FYn.jpeg",
-        embeds = {{
-            color = onDuty and 3066993 or 15158332,
+    local embed = {
+        {
             title = "Duty Log",
             description = string.format("**%s** (Callsign: %s) from **%s** is now **%s**", name, callsign, department, status),
-            thumbnail = { url = departmentLogos[department] or "https://i.imgur.com/default-badge.png" },
+            color = onDuty and 3066993 or 15158332,
             fields = fields,
+            thumbnail = { url = logoUrl },
             footer = { text = "SpongeBobs Duty System • " .. currentTime },
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
-        }}
-    }), { ["Content-Type"] = "application/json" })
+        }
+    }
+
+    PerformHttpRequest(Config.WEBHOOK, function(err, text, headers)
+        if err == 204 then
+            print("^2[Duty System] Webhook sent successfully!^0")
+        else
+            print("^1[Duty System] Webhook failed! HTTP code:", err, text, "^0")
+        end
+    end, "POST", json.encode({
+        username = "SpongeBobs Duty System",
+        avatar_url = "https://i.imgur.com/RZ26FYn.jpeg",
+        embeds = embed
+    }), {
+        ["Content-Type"] = "application/json"
+    })
 end
 
 AddEventHandler('playerDropped', function()
