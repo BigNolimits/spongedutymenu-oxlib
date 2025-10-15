@@ -4,20 +4,22 @@ local playerName = ""
 local callsign = ""
 local dutyBlips = {}
 
--- /duty toggle command
 RegisterCommand("duty", function()
     if isOnDuty then
-        -- Already on duty ? clock off
         TriggerServerEvent("duty:updateStatus", false, department, playerName, callsign)
         return
     end
 
+    local departmentOptions = {}
+    for _, dept in ipairs(Config.Departments) do
+        table.insert(departmentOptions, {
+            label = dept.label,
+            value = dept.value
+        })
+    end
+
     local input = lib.inputDialog('Duty Menu', {
-        {type = 'select', label = 'Department', options = {
-            {label = 'SASP', value = 'SASP'},
-            {label = 'BCSO', value = 'BCSO'},
-            {label = 'LSPD', value = 'LSPD'}
-        }},
+        {type = 'select', label = 'Department', options = departmentOptions},
         {type = 'input', label = 'Your Name'},
         {type = 'input', label = 'Callsign'}
     })
@@ -27,7 +29,6 @@ RegisterCommand("duty", function()
         playerName = input[2]
         callsign = input[3]
 
-        -- Send request to server, client will be set on duty after confirmation
         TriggerServerEvent("duty:updateStatus", true, department, playerName, callsign)
     else
         lib.notify({
@@ -38,19 +39,16 @@ RegisterCommand("duty", function()
     end
 end)
 
--- Server confirms you are on duty
 RegisterNetEvent("duty:confirmedOnDuty")
 AddEventHandler("duty:confirmedOnDuty", function()
     isOnDuty = true
 end)
 
--- Server informs that role check failed
 RegisterNetEvent("duty:roleFailed")
 AddEventHandler("duty:roleFailed", function()
     isOnDuty = false
 end)
 
--- Show duty time when clocking off
 RegisterNetEvent("duty:showDutyTime")
 AddEventHandler("duty:showDutyTime", function(dutyTime)
     lib.notify({
@@ -60,30 +58,45 @@ AddEventHandler("duty:showDutyTime", function(dutyTime)
     })
 end)
 
--- Give full loadout
 RegisterNetEvent("duty:giveLoadout")
-AddEventHandler("duty:giveLoadout", function()
+AddEventHandler("duty:giveLoadout", function(dept)
     local ped = PlayerPedId()
-    GiveWeaponToPed(ped, `WEAPON_COMBATPISTOL`, 250, false, true)
-    GiveWeaponComponentToPed(ped, `WEAPON_COMBATPISTOL`, `COMPONENT_AT_PI_FLSH`)
-    GiveWeaponToPed(ped, `WEAPON_CARBINERIFLE`, 200, false, true)
-    GiveWeaponComponentToPed(ped, `WEAPON_CARBINERIFLE`, `COMPONENT_AT_AR_FLSH`)
-    GiveWeaponToPed(ped, `WEAPON_PUMPSHOTGUN`, 50, false, true)
-    GiveWeaponComponentToPed(ped, `WEAPON_PUMPSHOTGUN`, `COMPONENT_AT_AR_FLSH`)
-    GiveWeaponToPed(ped, `WEAPON_STUNGUN`, 1, false, true)
-    GiveWeaponToPed(ped, `WEAPON_NIGHTSTICK`, 1, false, true)
-    GiveWeaponToPed(ped, `WEAPON_FLASHLIGHT`, 1, false, true)
-    GiveWeaponToPed(ped, `WEAPON_FIREEXTINGUISHER`, 1000, false, true)
-    SetPedArmour(ped, 100)
+    local departmentConfig = nil
+    
+    for _, deptData in ipairs(Config.Departments) do
+        if deptData.value == dept then
+            departmentConfig = deptData
+            break
+        end
+    end
+    
+    if not departmentConfig then
+        lib.notify({
+            title = "Loadout",
+            description = "Department configuration not found.",
+            type = "error"
+        })
+        return
+    end
+    
+    for _, weaponData in ipairs(departmentConfig.loadout.weapons) do
+        local weaponHash = GetHashKey(weaponData.weapon)
+        GiveWeaponToPed(ped, weaponHash, weaponData.ammo, false, true)
+        
+        for _, component in ipairs(weaponData.components) do
+            GiveWeaponComponentToPed(ped, weaponHash, GetHashKey(component))
+        end
+    end
+    
+    SetPedArmour(ped, departmentConfig.loadout.armor)
 
     lib.notify({
         title = "Loadout",
-        description = "?? Full duty loadout equipped with attachments.",
+        description = "✓ Full duty loadout equipped with attachments.",
         type = "success"
     })
 end)
 
--- Update blips for all players on duty
 RegisterNetEvent("duty:updateBlips")
 AddEventHandler("duty:updateBlips", function(playersOnDuty)
     for playerId, blipData in pairs(dutyBlips) do
@@ -112,10 +125,24 @@ AddEventHandler("duty:updateBlips", function(playersOnDuty)
     end
 end)
 
-function GetDepartmentBlipColor(dept) return ({SASP = 5, BCSO = 17, LSPD = 3})[dept] or 1 end
-function GetDepartmentBlipSprite(dept) return ({SASP = 56, BCSO = 56, LSPD = 56})[dept] or 1 end
+function GetDepartmentBlipColor(dept)
+    for _, department in ipairs(Config.Departments) do
+        if department.value == dept then
+            return department.blipColor
+        end
+    end
+    return 1 
+end
 
--- Clean up blips periodically
+function GetDepartmentBlipSprite(dept)
+    for _, department in ipairs(Config.Departments) do
+        if department.value == dept then
+            return department.blipSprite
+        end
+    end
+    return 1 
+end
+
 Citizen.CreateThread(function()
     while true do
         Wait(5000)
@@ -130,7 +157,6 @@ Citizen.CreateThread(function()
     end
 end)
 
--- Remove blips when resource stops
 AddEventHandler('onResourceStop', function(res)
     if res == GetCurrentResourceName() then
         for _, v in pairs(dutyBlips) do
